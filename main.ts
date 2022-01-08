@@ -1,13 +1,14 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TAbstractFile } from 'obsidian';
+import { TextInputSuggest } from "suggest";
 
 // Remember to rename these classes and interfaces!
 
 interface MyPluginSettings {
-	mySetting: string;
+	variableFile: string;
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+	variableFile: ""
 }
 
 export default class MyPlugin extends Plugin {
@@ -120,18 +121,84 @@ class SampleSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
-		containerEl.createEl('h2', {text: 'Settings for my awesome plugin.'});
+		containerEl.createEl('h2', {text: 'Settings for Variable Substitution.'});
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					console.log('Secret: ' + value);
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
+			.setName('Variable File Location')
+			.setDesc('File where variables are defined')
+			.addSearch((cb) => {
+				new FileSuggest(
+					this.app,
+					cb.inputEl,
+					this.plugin,
+				);
+				cb.setPlaceholder("Example: folder1/template_file")
+					.setValue(this.plugin.settings.variableFile)
+					.onChange((new_template) => {
+						this.plugin.settings.variableFile = new_template;
+						this.plugin.saveData(this.plugin.settings);
+					})
+			});
+	}
+}
+
+// Credits go to Liam's Periodic Notes Plugin: https://github.com/liamcain/obsidian-periodic-notes. 
+// Slight modification to reduce the dependency on other modules
+export class FileSuggest extends TextInputSuggest<TFile> {
+    constructor(
+        public app: App,
+        public inputEl: HTMLInputElement,
+        private plugin: MyPlugin,
+    ) {
+        super(app, inputEl);
+    }
+
+    get_folder(): string {
+        return this.plugin.settings.variableFile;
+    }
+
+    getSuggestions(input_str: string): TFile[] {
+        const all_files = this.get_tfiles_from_folder(this.app, this.get_folder());
+        if (!all_files) {
+            return [];
+        }
+
+        const files: TFile[] = [];
+        const lower_input_str = input_str.toLowerCase();
+
+        all_files.forEach((file: TAbstractFile) => {
+            if (
+                file instanceof TFile &&
+                file.extension === "md" &&
+                file.path.toLowerCase().contains(lower_input_str)
+            ) {
+                files.push(file);
+            }
+        });
+
+        return files;
+    }
+
+    renderSuggestion(file: TFile, el: HTMLElement): void {
+        el.setText(file.path);
+    }
+
+    selectSuggestion(file: TFile): void {
+        this.inputEl.value = file.path;
+        this.inputEl.trigger("input");
+        this.close();
+    }
+
+	get_tfiles_from_folder(
+		app: App,
+		folder_str: string
+	): Array<TFile> {	
+		const files: Array<TFile> = this.app.vault.getFiles()
+	
+		files.sort((a, b) => {
+			return a.basename.localeCompare(b.basename);
+		});
+	
+		return files;
 	}
 }
