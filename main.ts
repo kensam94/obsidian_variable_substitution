@@ -11,8 +11,14 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 	variableFile: ""
 }
 
+export interface IHash {
+    [details: string] : string;
+} 
+
 export default class MyPlugin extends Plugin {
 	settings: MyPluginSettings;
+	variableList: IHash = {};
+	substitutionRegex = /(<span class="var-start">([\w-]+)<\/span>).*(<span class="var-end">([\w-]+)<\/span>)/g;
 
 	async onload() {
 		await this.loadSettings();
@@ -31,10 +37,11 @@ export default class MyPlugin extends Plugin {
 
 		// This adds a simple command that can be triggered anywhere
 		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
+			id: 'substitute-variable-in-current-page',
+			name: 'Substitute variable in current page',
 			callback: () => {
-				new SampleModal(this.app).open();
+				this.loadVariable();
+				this.substitution(this.app.workspace.getActiveFile());
 			}
 		});
 		// This adds an editor command that can perform some operation on the current editor instance
@@ -48,21 +55,11 @@ export default class MyPlugin extends Plugin {
 		});
 		// This adds a complex command that can check whether the current state of the app allows execution of the command
 		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
+			id: 'substitute-variable-in-all-pages',
+			name: 'Substitute variable in all pages',
+			callback: () => {
+				this.loadVariable();
+				this.substitutionAll();
 			}
 		});
 
@@ -89,6 +86,85 @@ export default class MyPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+	}
+
+	loadVariable(){
+		this.app.vault.adapter.read(this.settings.variableFile)
+			.then((text) => {
+				var lines = text.split("\n");
+				lines.forEach(line => {
+					var splits = line.split(/:(?<!\\:)/);
+					if(splits.length==2){
+						this.variableList[splits[0]] = splits[1];
+					}
+				});
+			})
+			.catch((err) => {
+				console.error(err);
+				new Notice(err);
+			})
+			.finally(() => {
+				// console.log(this.variableList);
+			});
+	}
+
+	substitution = (file:TFile, singleFile=true):Promise<boolean> => {
+		let hasSubstitution = false;
+	
+		return new Promise((resolve, reject) => {
+			this.app.vault.adapter.read(file.path)
+			.then((text) => {
+				var lines = text.split("\n");
+				lines.forEach((line, n) => {
+					var regex_out = this.substitutionRegex.exec(line);
+					if(regex_out){
+						var start_var = regex_out[2];
+						var end_var = regex_out[4];
+						var start_syntax = regex_out[1];
+						var end_syntax = regex_out[3];
+						if (start_var != end_var)
+							new Notice(`${start_var} and ${end_var} does not match at line ${n} of ${file.path}`);
+						else if(!(start_var in this.variableList))
+							new Notice(`${start_var} is not defined`);
+						lines[n] = line.replace(this.substitutionRegex,start_syntax+this.variableList[start_var]+end_syntax);
+						hasSubstitution = true;
+					}
+				});
+				if(hasSubstitution){
+					this.app.vault.adapter.write(file.path,lines.join("\n"))
+						.then(() => {
+							new Notice(`Substitution is done`);
+						})
+						.catch((err) => {
+							console.error(err);
+							new Notice(err);
+						});
+				}else{
+					if(singleFile)
+						new Notice(`No variable is found`);
+				}
+			})
+			.catch((err) => {
+				console.error(err);
+				new Notice(err);
+			})
+			.finally(() => {
+				resolve(hasSubstitution);
+			});
+		})
+	}
+
+	substitutionAll(){
+		const all_files = new Util().get_tfiles_from_folder(this.app, this.settings.variableFile);
+		var modifiedFileList: string[] = []
+		all_files.forEach(async file => {
+			const result = await this.substitution(file,false)
+			if(result)
+				modifiedFileList.push(file.path);
+		});
+		console.log("Modified File List:");
+		console.log(modifiedFileList);
+		new Notice(`Substitution is done`);
 	}
 }
 
@@ -144,7 +220,7 @@ class SampleSettingTab extends PluginSettingTab {
 
 // Credits go to Liam's Periodic Notes Plugin: https://github.com/liamcain/obsidian-periodic-notes. 
 // Slight modification to reduce the dependency on other modules
-export class FileSuggest extends TextInputSuggest<TFile> {
+class FileSuggest extends TextInputSuggest<TFile> {
     constructor(
         public app: App,
         public inputEl: HTMLInputElement,
@@ -158,7 +234,7 @@ export class FileSuggest extends TextInputSuggest<TFile> {
     }
 
     getSuggestions(input_str: string): TFile[] {
-        const all_files = this.get_tfiles_from_folder(this.app, this.get_folder());
+        const all_files = new Util().get_tfiles_from_folder(this.app, this.get_folder());
         if (!all_files) {
             return [];
         }
@@ -189,11 +265,15 @@ export class FileSuggest extends TextInputSuggest<TFile> {
         this.close();
     }
 
+	
+}
+
+class Util {
 	get_tfiles_from_folder(
 		app: App,
 		folder_str: string
 	): Array<TFile> {	
-		const files: Array<TFile> = this.app.vault.getFiles()
+		const files: Array<TFile> = app.vault.getFiles()
 	
 		files.sort((a, b) => {
 			return a.basename.localeCompare(b.basename);
