@@ -4,15 +4,17 @@ import { TextInputSuggest } from "suggest";
 // Remember to rename these classes and interfaces!
 
 interface MyPluginSettings {
-	variableFile: string;
+	variableFile: string,
+	debugPrint: boolean,
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-	variableFile: ""
+	variableFile: "",
+	debugPrint: false,
 }
 
 export interface IHash {
-    [details: string] : string;
+    [details: string] : any;
 } 
 
 export default class MyPlugin extends Plugin {
@@ -108,7 +110,8 @@ export default class MyPlugin extends Plugin {
 			});
 	}
 
-	substitution = (file:TFile, singleFile=true):Promise<boolean> => {
+	substitution = (file:TFile, singleFile=true):Promise<[boolean,IHash]> => {
+		let variableStatus:IHash = {}
 		let hasSubstitution = false;
 	
 		return new Promise((resolve, reject) => {
@@ -122,24 +125,41 @@ export default class MyPlugin extends Plugin {
 						var end_var = regex_out[4];
 						var start_syntax = regex_out[1];
 						var end_syntax = regex_out[3];
-						if (start_var != end_var)
+						if (!variableStatus[start_var]) {
+							variableStatus[start_var] = {}
+						}
+						if (start_var != end_var){
 							new Notice(`${start_var} and ${end_var} does not match at line ${n} of ${file.path}`);
-						else if(!(start_var in this.variableList))
+							variableStatus[start_var]["error"] = `${start_var} and ${end_var} does not match at line ${n}`;
+						}
+						else if(!(start_var in this.variableList)){
 							new Notice(`${start_var} is not defined`);
-						lines[n] = line.replace(this.substitutionRegex,start_syntax+this.variableList[start_var]+end_syntax);
-						hasSubstitution = true;
+							variableStatus[start_var]["error"] = `${start_var} is not defined`;
+						}
+						if(regex_out[0] == start_syntax+this.variableList[start_var]+end_syntax){
+							variableStatus[start_var]["modified"] = false;
+						}else{
+							variableStatus[start_var]["modified"] = true;
+							hasSubstitution = true;
+							lines[n] = line.replace(this.substitutionRegex,start_syntax+this.variableList[start_var]+end_syntax);
+						}
 					}
 				});
 				if(hasSubstitution){
 					this.app.vault.adapter.write(file.path,lines.join("\n"))
 						.then(() => {
-							new Notice(`Substitution is done`);
+							if(singleFile)
+								new Notice(`Substitution is done`);
 						})
 						.catch((err) => {
 							console.error(err);
 							new Notice(err);
 						});
-				}else{
+				}else if(!Utils.isEmpty(variableStatus)){
+					if(singleFile)
+						new Notice(`Nothing is updated`);
+				}
+				else{
 					if(singleFile)
 						new Notice(`No variable is found`);
 				}
@@ -149,22 +169,41 @@ export default class MyPlugin extends Plugin {
 				new Notice(err);
 			})
 			.finally(() => {
-				resolve(hasSubstitution);
+				resolve([hasSubstitution,variableStatus]);
+				if(singleFile && this.settings.debugPrint)
+					console.log(variableStatus);
 			});
 		})
 	}
 
 	substitutionAll(){
-		const all_files = new Util().get_tfiles_from_folder(this.app, this.settings.variableFile);
-		var modifiedFileList: string[] = []
-		all_files.forEach(async file => {
-			const result = await this.substitution(file,false)
-			if(result)
-				modifiedFileList.push(file.path);
+		const all_files = Utils.get_tfiles_from_folder(this.app, this.settings.variableFile);
+		let overallStatus: IHash = {};
+		let updatedFileCount = 0;
+		var complete = new Promise((resolve, reject) => {
+			all_files.forEach(async (file, index, array) => {
+				const result:IHash = await this.substitution(file,false);
+				if(!Utils.isEmpty(result[1]) && this.settings.debugPrint){
+					overallStatus[file.path] = result[1];
+				}
+				if(result[0]){
+					updatedFileCount+=1;
+				}
+				if (index === array.length -1) 
+					resolve(updatedFileCount);
+			});
 		});
-		console.log("Modified File List:");
-		console.log(modifiedFileList);
-		new Notice(`Substitution is done`);
+
+		complete.then(() => {
+			if(this.settings.debugPrint){
+				console.log(`${updatedFileCount} file is modified`);
+				console.log(overallStatus);
+			}
+			if(updatedFileCount>0)
+				new Notice(`Substitution is done`);
+			else
+				new Notice(`Nothing is updated`);
+		});
 	}
 }
 
@@ -215,6 +254,20 @@ class SampleSettingTab extends PluginSettingTab {
 						this.plugin.saveData(this.plugin.settings);
 					})
 			});
+		
+		new Setting(containerEl)
+            .setName("Debug Print")
+            .setDesc(
+                "Print the list of variables for each file"
+            )
+            .addToggle(toggle => {
+                toggle
+                    .setValue(this.plugin.settings.debugPrint)
+                    .onChange(async value => {
+                        this.plugin.settings.debugPrint = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
 	}
 }
 
@@ -234,7 +287,7 @@ class FileSuggest extends TextInputSuggest<TFile> {
     }
 
     getSuggestions(input_str: string): TFile[] {
-        const all_files = new Util().get_tfiles_from_folder(this.app, this.get_folder());
+        const all_files = Utils.get_tfiles_from_folder(this.app, this.get_folder());
         if (!all_files) {
             return [];
         }
@@ -268,8 +321,8 @@ class FileSuggest extends TextInputSuggest<TFile> {
 	
 }
 
-class Util {
-	get_tfiles_from_folder(
+class Utils {
+	static get_tfiles_from_folder(
 		app: App,
 		folder_str: string
 	): Array<TFile> {	
@@ -280,5 +333,9 @@ class Util {
 		});
 	
 		return files;
+	}
+
+	static isEmpty(obj:Object) {
+		return Object.keys(obj).length == 0;
 	}
 }
