@@ -1,4 +1,4 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TAbstractFile } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TAbstractFile, TFolder } from 'obsidian';
 import { TextInputSuggest } from "suggest";
 
 // Remember to rename these classes and interfaces!
@@ -6,11 +6,15 @@ import { TextInputSuggest } from "suggest";
 interface MyPluginSettings {
 	variableFile: string,
 	debugPrint: boolean,
+	backupFolder: string,
+	backupEnable: boolean,
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
 	variableFile: "",
 	debugPrint: false,
+	backupFolder: "",
+	backupEnable: true,
 }
 
 export interface IHash {
@@ -39,11 +43,14 @@ export default class MyPlugin extends Plugin {
 
 		// This adds a simple command that can be triggered anywhere
 		this.addCommand({
-			id: 'substitute-variable-in-current-page',
-			name: 'Substitute variable in current page',
-			callback: () => {
-				this.loadVariable();
-				this.substitution(this.app.workspace.getActiveFile());
+			id: 'substitute-variable-in-current-file',
+			name: 'Substitute variable in current file',
+			callback: async () => {
+				const exist = await this.variableFileExist();
+				if(exist){
+					this.loadVariable();
+					this.substitution(this.app.workspace.getActiveFile());
+				}
 			}
 		});
 		// This adds an editor command that can perform some operation on the current editor instance
@@ -57,11 +64,14 @@ export default class MyPlugin extends Plugin {
 		});
 		// This adds a complex command that can check whether the current state of the app allows execution of the command
 		this.addCommand({
-			id: 'substitute-variable-in-all-pages',
-			name: 'Substitute variable in all pages',
-			callback: () => {
-				this.loadVariable();
-				this.substitutionAll();
+			id: 'substitute-variable-in-all-files',
+			name: 'Substitute variable in all files',
+			callback: async () => {
+				const exist = await this.variableFileExist();
+				if(exist){
+					this.loadVariable();
+					this.substitutionAll();
+				}
 			}
 		});
 
@@ -135,8 +145,7 @@ export default class MyPlugin extends Plugin {
 						else if(!(start_var in this.variableList)){
 							new Notice(`${start_var} is not defined`);
 							variableStatus[start_var]["error"] = `${start_var} is not defined`;
-						}
-						if(regex_out[0] == start_syntax+this.variableList[start_var]+end_syntax){
+						}else if(regex_out[0] == start_syntax+this.variableList[start_var]+end_syntax){
 							variableStatus[start_var]["modified"] = false;
 						}else{
 							variableStatus[start_var]["modified"] = true;
@@ -146,15 +155,27 @@ export default class MyPlugin extends Plugin {
 					}
 				});
 				if(hasSubstitution){
-					this.app.vault.adapter.write(file.path,lines.join("\n"))
-						.then(() => {
-							if(singleFile)
-								new Notice(`Substitution is done`);
+					if(this.settings.backupEnable && !singleFile){
+						let backupFileName = `${this.settings.backupFolder}/${file.name}.bak`
+						this.app.vault.adapter.exists(backupFileName)
+						.then((exists) => {
+							if(exists){
+								this.app.vault.adapter.remove(backupFileName)
+							}
+							this.app.vault.copy(file,`${this.settings.backupFolder}/${file.name}.bak`)
+							.then(() => {
+								this.app.vault.adapter.write(file.path,lines.join("\n"))
+								.then(() => {
+									if(singleFile)
+										new Notice(`Substitution is done`);
+								})
+								.catch((err) => {
+									console.error(err);
+									new Notice(err);
+								});
+							})
 						})
-						.catch((err) => {
-							console.error(err);
-							new Notice(err);
-						});
+					}
 				}else if(!Utils.isEmpty(variableStatus)){
 					if(singleFile)
 						new Notice(`Nothing is updated`);
@@ -205,6 +226,29 @@ export default class MyPlugin extends Plugin {
 				new Notice(`Nothing is updated`);
 		});
 	}
+
+	variableFileExist():Promise<boolean>{
+		let result = false;
+
+		return new Promise((resolve, reject) => {
+			this.app.vault.adapter.exists(this.settings.variableFile)
+			.then((exists) => {
+				if(exists)
+					result = true;
+				else{
+					new Notice(`Variable File, ${this.settings.variableFile} is not found. Please configure it in plugin options`);
+					result = false;
+				}	
+			})
+			.catch((err) => {
+				console.error(err);
+				result = false;
+			})
+			.finally(()=>{
+				resolve(result);
+			})
+		});
+	}
 }
 
 class SampleModal extends Modal {
@@ -249,8 +293,39 @@ class SampleSettingTab extends PluginSettingTab {
 				);
 				cb.setPlaceholder("Example: folder1/template_file")
 					.setValue(this.plugin.settings.variableFile)
-					.onChange((new_template) => {
-						this.plugin.settings.variableFile = new_template;
+					.onChange((new_value) => {
+						this.plugin.settings.variableFile = new_value;
+						this.plugin.saveData(this.plugin.settings);
+					})
+			});
+		
+		new Setting(containerEl)
+            .setName("Enable Backup")
+            .setDesc(
+                'Enable backup before substition. Only applicable to "Substitute variable in all files". For "Substitute variable in current file", please use ctrl+z to undo.'
+            )
+            .addToggle(toggle => {
+                toggle
+                    .setValue(this.plugin.settings.debugPrint)
+                    .onChange(async value => {
+                        this.plugin.settings.debugPrint = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
+
+		new Setting(containerEl)
+			.setName('Backup Folder')
+			.setDesc('Folder where the files will be backup before substitution. Only applicable to "Substitute variable in all files"')
+			.addSearch((cb) => {
+				new FolderSuggest(
+					this.app,
+					cb.inputEl,
+					this.plugin,
+				);
+				cb.setPlaceholder("Example: folder1")
+					.setValue(this.plugin.settings.backupFolder)
+					.onChange((new_value) => {
+						this.plugin.settings.backupFolder = new_value;
 						this.plugin.saveData(this.plugin.settings);
 					})
 			});
@@ -321,12 +396,48 @@ class FileSuggest extends TextInputSuggest<TFile> {
 	
 }
 
+export class FolderSuggest extends TextInputSuggest<TFolder> {
+	constructor(
+        public app: App,
+        public inputEl: HTMLInputElement,
+        private plugin: MyPlugin,
+    ) {
+        super(app, inputEl);
+    }
+	getSuggestions(inputStr: string): TFolder[] {
+		const abstractFiles = this.app.vault.getAllLoadedFiles();
+		const folders: TFolder[] = [];
+		const lowerCaseInputStr = inputStr.toLowerCase();
+
+		abstractFiles.forEach((folder: TAbstractFile) => {
+		if (
+			folder instanceof TFolder &&
+			folder.path.toLowerCase().contains(lowerCaseInputStr)
+		) {
+			folders.push(folder);
+		}
+		});
+
+		return folders;
+	}
+
+	renderSuggestion(file: TFolder, el: HTMLElement): void {
+		el.setText(file.path);
+	}
+
+	selectSuggestion(file: TFolder): void {
+		this.inputEl.value = file.path;
+		this.inputEl.trigger("input");
+		this.close();
+	}
+}
+
 class Utils {
 	static get_tfiles_from_folder(
 		app: App,
 		folder_str: string
 	): Array<TFile> {	
-		const files: Array<TFile> = app.vault.getFiles()
+		const files: Array<TFile> = app.vault.getMarkdownFiles()
 	
 		files.sort((a, b) => {
 			return a.basename.localeCompare(b.basename);
